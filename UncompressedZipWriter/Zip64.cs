@@ -3,21 +3,28 @@
 
 static public class Zip64
 {
-    static FileStream WriteStreamAndComputeCrc(this FileStream output, Stream input, Action<uint> calculatedCrc)
+    static public void ZipToFiles(string targetFile, string[] filesToZip)
     {
-        byte[] buff = new byte[1024];
+        var files = filesToZip.Select(f => new FileInZip(Name: Path.GetFileName(f), Stream: File.OpenRead(f), Size: new FileInfo(f).Length, LastModified: new FileInfo(f).LastWriteTime)).ToArray();
 
-        int len = input.Read(buff, 0, buff.Length);
-        uint crc = Force.Crc32.Crc32Algorithm.Compute(buff, 0, len);
-        output.Write(buff, 0, len);
+        var zip = File.Create(targetFile);
 
-        while ((len = input.Read(buff, 0, buff.Length)) > 0)
+        /// [local file entries]
+        foreach (var file in files)
         {
-            crc = Force.Crc32.Crc32Algorithm.Append(crc, buff, 0, len);
-            output.Write(buff, 0, len);
+            zip.WriteFileEntry(file);
         }
-        calculatedCrc(crc);
-        return output;
+
+        /// [central directory]
+        var start = (ulong)zip.Position;
+        foreach (var file in files)
+        {
+            zip.WriteCentralDirectoryEntry(file);
+        }
+
+        zip.WriteEndOfCentralDirectory(count: (ulong)files.Length, offset: start, length: (ulong)zip.Position - start);
+
+        zip.Close();
     }
 
     static FileStream WriteFileEntry(this FileStream zip, FileInZip file)
@@ -77,32 +84,20 @@ static public class Zip64
         ;
     }
 
-    static public void ZipToFiles(string targetFile, string[] filesToZip)
+    static FileStream WriteStreamAndComputeCrc(this FileStream output, Stream input, Action<uint> calculatedCrc)
     {
-        var zip = File.Create(targetFile);
+        byte[] buff = new byte[1024];
 
-        var files = filesToZip.Select(f => new FileInZip(Path.GetFileName(f), File.OpenRead(f), new FileInfo(f).Length, new FileInfo(f).LastWriteTime)).ToArray();
+        int len = input.Read(buff, 0, buff.Length);
+        uint crc = Force.Crc32.Crc32Algorithm.Compute(buff, 0, len);
+        output.Write(buff, 0, len);
 
-        foreach (var file in files)
+        while ((len = input.Read(buff, 0, buff.Length)) > 0)
         {
-            zip.WriteFileEntry(file);
+            crc = Force.Crc32.Crc32Algorithm.Append(crc, buff, 0, len);
+            output.Write(buff, 0, len);
         }
-
-        var centralDirectoryStart = (ulong)zip.Position;
-
-        /// [central directory header N]
-        foreach (var file in files)
-        {
-            zip.WriteCentralDirectoryEntry(file);
-        }
-
-        var centralDirectoryEnd = (ulong)zip.Position;
-
-        var centralDirectorySize = centralDirectoryEnd - centralDirectoryStart;
-        var fileCount = (ulong)files.Length;
-
-        zip.WriteEndOfCentralDirectory(fileCount, centralDirectoryStart, centralDirectorySize);
-
-        zip.Close();
+        calculatedCrc(crc);
+        return output;
     }
 }
