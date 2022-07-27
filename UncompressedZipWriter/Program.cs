@@ -1,9 +1,22 @@
 ﻿Console.WriteLine("Let's Zip This!");
 
-Zip64.ZipToFiles(@"C:\Users\davep\Downloads\Test.zip", new[]
+//Zip64.ZipToFiles(@"C:\Users\spoda\Downloads\Test.zip", new[]
+//{
+//    @"C:\Users\spoda\Downloads\Datei 1.json",
+//    @"C:\Users\spoda\Downloads\Datei 2.json"
+//});
+
+//Zip64.ZipToFiles(@"C:\Users\spoda\Downloads\Test.zip", new[]
+//{
+//    @"C:\Users\spoda\Downloads\Datei 1.mp4",
+//    @"C:\Users\spoda\Downloads\Datei 2.mp4"
+//});
+
+Zip64.ZipToFiles(@"C:\Users\spoda\Downloads\Test.zip", new[]
 {
-    @"C:\Users\davep\Downloads\Datei 1.txt",
-    @"C:\Users\davep\Downloads\Datei 2.txt"
+    @"C:\Users\spoda\Downloads\Datei 1.json",
+    @"C:\Users\spoda\Downloads\MEMORY.DMP",
+    @"C:\Users\spoda\Downloads\Datei 2.mp4"
 });
 
 

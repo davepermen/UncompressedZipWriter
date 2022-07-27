@@ -1,179 +1,108 @@
-﻿using System.Text;
-using System.Security.Cryptography;
-
-
-/// https://pkware.cachefly.net/webdocs/casestudies/APPNOTE.TXT
+﻿/// https://pkware.cachefly.net/webdocs/casestudies/APPNOTE.TXT
+/// https://rzymek.github.io/post/excel-zip64/
 
 static public class Zip64
 {
-    static uint ComputeCrc(Stream stream)
+    static FileStream WriteStreamAndComputeCrc(this FileStream output, Stream input, Action<uint> calculatedCrc)
     {
-        uint crc = 0;
         byte[] buff = new byte[1024];
-        int len = stream.Read(buff, 0, buff.Length);
-        crc = Force.Crc32.Crc32Algorithm.Compute(buff, 0, len);
-        while ((len = stream.Read(buff, 0, buff.Length)) > 0)
+
+        int len = input.Read(buff, 0, buff.Length);
+        uint crc = Force.Crc32.Crc32Algorithm.Compute(buff, 0, len);
+        output.Write(buff, 0, len);
+
+        while ((len = input.Read(buff, 0, buff.Length)) > 0)
         {
             crc = Force.Crc32.Crc32Algorithm.Append(crc, buff, 0, len);
+            output.Write(buff, 0, len);
         }
-        stream.Position = 0;
-        return crc;
+        calculatedCrc(crc);
+        return output;
+    }
+
+    static FileStream WriteFileEntry(this FileStream zip, FileInZip file)
+    {
+        file.Offset = (uint)zip.Position;
+
+        return zip
+            .Write_8(0x50, 0x4b, 0x03, 0x04)                                  /// header [local file header]
+            .Write16(45, 0b00001000, 0, file.TimeBits, file.DateBits)         // version (45 = ZIP64) | general purpose bitflag (bit 3 for Data Descriptor at End) | compression method (0 = store) | time | date
+            .Write32(0, 0, 0)                                                 // CRC bits | compressed size | uncompressed size => 0 each for data descriptor
+            .Write16((ushort)file.NameAsBytes.Length, 0)                      // filename length | extrafield size
+            .Write_8(file.NameAsBytes)                                        // filename
+            .WriteStreamAndComputeCrc(file.Stream, crc => file.CrcBits = crc) // write the actual data and calculate crc
+            .Write_8(0x50, 0x4b, 0x07, 0x08)                                  // data descriptor header
+            .Write32(file.CrcBits)                                            // CRC bits
+            .Write64((ulong)file.Size, (ulong)file.Size)                      // compressed size: ZIP64 extra | uncompressed size: ZIP64 extra
+        ;
+    }
+
+    static FileStream WriteCentralDirectoryEntry(this FileStream zip, FileInZip file)
+    {
+        return zip
+            .Write_8(0x50, 0x4b, 0x01, 0x02)                              /// header [central directory header]
+            .Write16(45, 45, 0b00001000, 0, file.TimeBits, file.DateBits) // version (ZIP64) | min version to extract (ZIP64) | general purpose bitflag (bit 3 for Data Descriptor at End) | compression method (0 = store) | time | date
+            .Write32(file.CrcBits, 0xFFFFFFFF, 0xFFFFFFFF)                // CRC bits | compressed size | uncompressed size => FFFFFFFF for ZIP64
+            .Write16((ushort)file.NameAsBytes.Length)                     // filename length
+            .Write16(20, 0, 0, 0)                                         // extrafield length | file comment length | disk number | internal file attributes
+            .Write32(0, file.Offset)                                      // external file attributes, offset of file
+            .Write_8(file.NameAsBytes)                                    // filename
+            .Write_8(0x01, 0x00)                                          // extrafield header
+            .Write16(16)                                                  // size of extrafield (below)
+            .Write64((ulong)file.Size, (ulong)file.Size)                  // compressed size: ZIP64 extra | uncompressed size: ZIP64 extra
+        ;
+    }
+
+    static FileStream WriteEndOfCentralDirectory(this FileStream zip, ulong count, ulong offset, ulong length)
+    {
+        zip
+            .Write_8(0x50, 0x4b, 0x06, 0x06)       /// header [zip64 end of central directory record]
+            .Write64(44)                           // size of remaining record is 56 bytes
+            .Write16(45, 45)                       // version (ZIP64) | min version to extract (ZIP64)
+            .Write32(0, 0)                         // number of this disk | number of the disk with the start of the central directory
+            .Write64(count, count, length, offset) // total number of entries in the central directory on this disk | total number of entries in the central directory | size of central directory | offset of start of central directory with respect to the starting disk number
+        ;
+
+        zip
+            .Write_8(0x50, 0x4b, 0x06, 0x07)       /// header [zip64 end of central directory locator]
+            .Write32(0)                            // number of the disk with the start of the zip64 end of central directory
+            .Write64(offset)                       // relative offset of the zip64 end of central directory record
+            .Write32(1)                            // total number of disks
+        ;
+
+        return zip
+            .Write_8(0x50, 0x4b, 0x05, 0x06)       /// header [end of central directory record]
+            .Write16(0, 0, 0xFFFF, 0xFFFF)         // disk number | starting disk | central directory number | central directory amount
+            .Write32(0xFFFFFFFF, 0xFFFFFFFF)       // central directory size | central directory offset
+            .Write16(0)
+        ;
     }
 
     static public void ZipToFiles(string targetFile, string[] filesToZip)
     {
-        var crc32 = new UncompressedZipWriter.Crc32();
-
         var zip = File.Create(targetFile);
 
-        var timestamp = DateTime.Parse("2022-04-17") + TimeSpan.FromHours(18) + TimeSpan.FromMinutes(22) + TimeSpan.FromSeconds(30);
+        var files = filesToZip.Select(f => new FileInZip(Path.GetFileName(f), File.OpenRead(f), new FileInfo(f).Length, new FileInfo(f).LastWriteTime)).ToArray();
 
-        var files = filesToZip.Select(f => new FileInZip(Path.GetFileName(f), File.OpenRead(f), new FileInfo(f).Length, timestamp)).ToArray();
-
-        /// [local file header N]
         foreach (var file in files)
         {
-            var lm = file.LastModified;
-
-            file.Offset = (uint)zip.Position;
-            file.TimeBits = (ushort)((lm.Second / 2) | lm.Minute << 5 | lm.Hour << 11);
-            file.DateBits = (ushort)(lm.Day | lm.Month << 5 | (lm.Year - 1980) << 9);
-
-            file.CrcBits = ComputeCrc(file.Stream);
-
-            zip
-                .WriteBytes(
-                    0x50, 0x4b, 0x03, 0x04,                         // header
-                    0x2D, 0x00,                                     // version
-                    0x00, 0x00,                                     // general purpose bitflag
-                    0x00, 0x00                                      // compression method (0 = store)
-                )
-                .WriteInt16AsBytes(file.TimeBits)
-                .WriteInt16AsBytes(file.DateBits)
-                .WriteInt32AsBytes(file.CrcBits)
-                .WriteBytes(
-                    0xFF, 0xFF, 0xFF, 0xFF,                         // compressed size: FFFFFFFF for ZIP64
-                    0xFF, 0xFF, 0xFF, 0xFF                          // uncompressed size: FFFFFFFF for ZIP64
-                )
-                .WriteInt16AsBytes((ushort)file.NameAsBytes.Length) // filename length
-                .WriteBytes(
-                    0x14, 0x00                                      // extrafield length
-                )
-                .WriteBytes(file.NameAsBytes)
-                .WriteBytes(
-                    0x01, 0x00, 0x10, 0x00                          // extrafield header
-                )
-                .WriteInt64AsBytes((ulong)file.Size)                // compressed size: ZIP64 extra
-                .WriteInt64AsBytes((ulong)file.Size)                // uncompressed size: ZIP64 extra
-                .WriteStreamAsBytes(file.Stream)                    // write the actual data
-            ;
+            zip.WriteFileEntry(file);
         }
 
-        var directoryOffset = zip.Position;
+        var centralDirectoryStart = (ulong)zip.Position;
 
         /// [central directory header N]
         foreach (var file in files)
         {
-            zip
-                .WriteBytes(
-                    0x50, 0x4b, 0x01, 0x02,                         // header
-                    0x3F, 0x00,                                     // version
-                    0x2D, 0x00,                                     // min version to extract
-                    0x00, 0x00,                                     // general purpose bitflag
-                    0x00, 0x00                                      // compression method (0 = store)
-                )
-                .WriteInt16AsBytes(file.TimeBits)
-                .WriteInt16AsBytes(file.DateBits)
-                .WriteInt32AsBytes(file.CrcBits)
-                .WriteBytes(
-                    0xFF, 0xFF, 0xFF, 0xFF,                         // compressed size: FFFFFFFF for ZIP64
-                    0xFF, 0xFF, 0xFF, 0xFF                          // uncompressed size: FFFFFFFF for ZIP64
-                )
-                .WriteInt16AsBytes((ushort)file.NameAsBytes.Length) // filename length
-                .WriteBytes(
-                    0x14, 0x00,                                     // extrafield length
-                    0x00, 0x00,                                     // file comment length
-                    0x00, 0x00,                                     // disk number
-                    0x00, 0x00,                                     // internal file attributes
-                    0x00, 0x00, 0x00, 0x00                          // external file attributes
-                )
-                .WriteInt32AsBytes(file.Offset)                     // offset of file
-                .WriteBytes(file.NameAsBytes)
-                .WriteBytes(
-                    0x01, 0x00, 0x10, 0x00                          // extrafield header
-                )
-                .WriteInt64AsBytes((ulong)file.Size)                // compressed size: ZIP64 extra
-                .WriteInt64AsBytes((ulong)file.Size)                // uncompressed size: ZIP64 extra
-            ;
+            zip.WriteCentralDirectoryEntry(file);
         }
 
-        var endOffset = zip.Position;
+        var centralDirectoryEnd = (ulong)zip.Position;
 
-        var zip64endofcentraldirectoryrecordOffset = zip.Position;
-        /// [zip64 end of central directory record]
-        zip
-            .WriteBytes(
-                0x50, 0x4b, 0x06, 0x06                              // header
-            )
-            // TODO
-        ;
+        var centralDirectorySize = centralDirectoryEnd - centralDirectoryStart;
+        var fileCount = (ulong)files.Length;
 
-        var zip64endofcentraldirectorylocatorOffset = zip.Position;
-        /// [zip64 end of central directory locator]
-        zip
-            .WriteBytes(
-                0x50, 0x4b, 0x06, 0x07,                             // header
-                0x00, 0x00                                          // current disk number
-            )
-            .WriteInt64AsBytes(0
-                /* relative offset to zip64endofcentraldirectoryrecordOffset */
-            )
-            .WriteBytes(
-                0x00, 0x00, 0x00, 0x00                              // number of disks
-            )
-            // TODO
-              ///   4.3.14  Zip64 end of central directory record
-
-              //  zip64 end of central dir
-              //  signature                       4 bytes(0x06064b50)
-              //  size of zip64 end of central
-              //  directory record                8 bytes
-              //  version made by                 2 bytes
-              //  version needed to extract       2 bytes
-              //  number of this disk             4 bytes
-              //  number of the disk with the
-              //  start of the central directory  4 bytes
-              //  total number of entries in the
-              //  central directory on this disk  8 bytes
-              //  total number of entries in the
-              //  central directory               8 bytes
-              //  size of the central directory   8 bytes
-              //  offset of start of central
-              //  directory with respect to
-              //  the starting disk number        8 bytes
-              //  zip64 extensible data sector(variable size)
-
-              //4.3.14.1 The value stored into the "size of zip64 end of central
-              //directory record" SHOULD be the size of the remaining
-              //record and SHOULD NOT include the leading 12 bytes.
-
-              //Size = SizeOfFixedFields + SizeOfVariableData - 12.
-        ;
-
-        var endofcentraldirectoryrecordOffset = zip.Position;
-        /// [end of central directory record]
-        zip
-            .WriteBytes(
-                0x50, 0x4b, 0x05, 0x06,                             // header
-                0x00, 0x00,                                         // disk number: FFFF for ZIP64
-                0x00, 0x00                                          // starting disk: FFFF for ZIP64
-            )
-            .WriteInt16AsBytes((ushort)files.Length)                // central directory number: FFFF for ZIP64
-            .WriteInt16AsBytes((ushort)files.Length)                // central directory amount: FFFF for ZIP64
-            .WriteInt32AsBytes((uint)(endOffset - directoryOffset)) // central directory size: FFFFFFFF for ZIP64
-            .WriteInt32AsBytes((uint)directoryOffset)               // central directory offset: FFFFFFFF for ZIP64
-            .WriteBytes(0x00, 0x00)                                 // comment length
-        ;
+        zip.WriteEndOfCentralDirectory(fileCount, centralDirectoryStart, centralDirectorySize);
 
         zip.Close();
     }
