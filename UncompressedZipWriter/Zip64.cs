@@ -30,8 +30,10 @@ static public class Zip64
             .Write32(0, 0, 0)                                                 // CRC bits | compressed size | uncompressed size => 0 each for data descriptor
             .Write16((ushort)file.NameAsBytes.Length, 0)                      // filename length | extrafield size
             .Write_8(file.NameAsBytes)                                        // filename
-            .WriteStreamAndComputeCrc(file.Stream, crc => file.CrcBits = crc) // write the actual data and calculate crc
-            .Write_8(0x50, 0x4b, 0x07, 0x08)                                  // data descriptor header
+
+            .WriteStreamAndComputeCrc(file.Stream, crc => file.CrcBits = crc) /// write the actual data and calculate crc
+
+            .Write_8(0x50, 0x4b, 0x07, 0x08)                                  /// header [data descriptor]
             .Write32(file.CrcBits)                                            // CRC bits
             .Write64((ulong)file.Size, (ulong)file.Size)                      // compressed size: ZIP64 extra | uncompressed size: ZIP64 extra
         ;
@@ -47,7 +49,8 @@ static public class Zip64
             .Write16(20, 0, 0, 0)                                         // extrafield length | file comment length | disk number | internal file attributes
             .Write32(0, file.Offset)                                      // external file attributes, offset of file
             .Write_8(file.NameAsBytes)                                    // filename
-            .Write_8(0x01, 0x00)                                          // extrafield header
+
+            .Write_8(0x01, 0x00)                                          /// extrafield header
             .Write16(16)                                                  // size of extrafield (below)
             .Write64((ulong)file.Size, (ulong)file.Size)                  // compressed size: ZIP64 extra | uncompressed size: ZIP64 extra
         ;
@@ -55,22 +58,18 @@ static public class Zip64
 
     static FileStream WriteEndOfCentralDirectory(this FileStream zip, ulong count, ulong offset, ulong length)
     {
-        zip
+        return zip
             .Write_8(0x50, 0x4b, 0x06, 0x06)       /// header [zip64 end of central directory record]
             .Write64(44)                           // size of remaining record is 56 bytes
             .Write16(45, 45)                       // version (ZIP64) | min version to extract (ZIP64)
             .Write32(0, 0)                         // number of this disk | number of the disk with the start of the central directory
             .Write64(count, count, length, offset) // total number of entries in the central directory on this disk | total number of entries in the central directory | size of central directory | offset of start of central directory with respect to the starting disk number
-        ;
 
-        zip
             .Write_8(0x50, 0x4b, 0x06, 0x07)       /// header [zip64 end of central directory locator]
             .Write32(0)                            // number of the disk with the start of the zip64 end of central directory
             .Write64(offset)                       // relative offset of the zip64 end of central directory record
             .Write32(1)                            // total number of disks
-        ;
 
-        return zip
             .Write_8(0x50, 0x4b, 0x05, 0x06)       /// header [end of central directory record]
             .Write16(0, 0, 0xFFFF, 0xFFFF)         // disk number | starting disk | central directory number | central directory amount
             .Write32(0xFFFFFFFF, 0xFFFFFFFF)       // central directory size | central directory offset
